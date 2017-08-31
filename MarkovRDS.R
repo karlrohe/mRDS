@@ -1,6 +1,15 @@
 library(dplyr)
 library(lazyeval)
 
+# This file contains code to perform 
+# 1) the assisted treebootstrap, as described in https://arxiv.org/abs/1505.05461
+# 2) feasible GLS, as described in https://arxiv.org/abs/1708.04999
+
+
+
+#######################################################################
+########  functions to perform theassisted treebootstrap for RDS ######
+#######################################################################
 
 
 atb = function(x, outcome = "HIV", blockVariable = NULL, Bcount, rawSamples = F, verbose = T, pretty = T){
@@ -56,8 +65,8 @@ atb = function(x, outcome = "HIV", blockVariable = NULL, Bcount, rawSamples = F,
     bad = which(x$id %in% x$id[anyDuplicated(x$id)])
     print(x[bad,])
     cat("
-This is a problem because we don't know who did the recruiting.
-If any repeating id's did not do any recruiting, then assign them arbitrary new id's and re-run.
+        This is a problem because we don't know who did the recruiting.
+        If any repeating id's did not do any recruiting, then assign them arbitrary new id's and re-run.
         ")
     return(NULL)
   }
@@ -89,7 +98,7 @@ If any repeating id's did not do any recruiting, then assign them arbitrary new 
   tab=table(x$recruiter.id)
   refs = tab[match(x$id, as.numeric(names(tab)))]
   refs[is.na(refs)]=0
-
+  
   n = nrow(x)
   
   # offSp[[i]] gives the rows of x that i refers.
@@ -378,28 +387,28 @@ atb_power = function(n,m, A, seeds = .9, pi = NULL,ybar = NULL, Bcount= 1000, fo
   thisIndex = which(mExtinct<m)[1]
   q= extinctionProb[thisIndex]
   
-
+  
   
   if(seeds > 1){
     if(!for.simulation) cat("For the specified value of m =", m, "and the number of seeds =", seeds,"
-      the probability of chain-death is:")
+                            the probability of chain-death is:")
     prob = round(q^seeds,2)
     if(!for.simulation)  if(prob<.05) cat(" less than 5%")
     if(!for.simulation)  if(prob>.05) cat(round(q^seeds,2))
   }
   
-
+  
   if(seeds < 1){
     if(!for.simulation)  cat("\nFor the specified value of m =", m, "and the desired probability of chain-death <",1-seeds,",
-you should select at least this many seeds:", ceiling(log(1-seeds, q)))
+                             you should select at least this many seeds:", ceiling(log(1-seeds, q)))
     seeds = ceiling(log(1-seeds, q))
   }
   
   if(!for.simulation)  cat("
-      This probability calculation is based upon 
-      independent Poisson referrals (i.e. wrong) 
-      and should only be used as a rough guide.
-      ")
+                           This probability calculation is based upon 
+                           independent Poisson referrals (i.e. wrong) 
+                           and should only be used as a rough guide.
+                           ")
   
   Tr = treeSamp(lambda=m, n, seeds)
   
@@ -451,7 +460,533 @@ you should select at least this many seeds:", ceiling(log(1-seeds, q)))
   
   if(!for.simulation)  cat("\n",names(dat), "\n" , round(dat,2), "\n \n")
   if(for.simulation) return(dat)
+  }
+
+
+
+
+
+
+
+#######################################################################
+########  functions to perform feasible GLS estimation for RDS ########
+#######################################################################
+
+# There are three types of estimators below, 
+# Delta, auto, and SBM. 
+# Delta is not recommended.  It is included for completeness. 
+# Each of these estimators is described in 
+# "Generalized Least Squares can overcome the critical threshold 
+#    in Respondent-Driven Sampling" by Roch and Rohe 2017. 
+
+
+
+
+
+
+######
+### The basic structure of fGLS is to:
+#  1)  (somehow) estimate \lambda_2, <y,f_2> and any other (lam,coef) pairs. (autocorrelation, delta-first diff, sbm)
+#  2)  use these to construct the auto-covariance function 
+#          - this is called acHat below
+#  3)  with the referral tree and the auto-covariance function, construct the nxn covariance matrix 
+#          - this is called makeCov below
+#  4)  with the covariance matrix, compute the GLS estimator by first solving system of equations:  Sigma x = 1.  
+#          - this is called gls below
+
+
+
+acHat = function(coefs, lams, diam){
+  #  given the (estimated) eigen-stuff (i.e. coefs and lams) and 
+  #      the maximum distance between two nodes in the referral tree (diam)
+  #  this function return the estimated auto-covariance function.
+  #  The output est[t+1] gives the covariance between Y_sigma and Y_tau 
+  #   for sigma and tau at distance t appart in the referral tree.
+  
+  # given the eigenvalues (lams) and the <y,f_\ell>^2 coefs,
+  #  compute the covariance as a function of t.  
+  #  returns a vector for which this is est[t+1]
+  #   the length of the vector should be (diam),
+  #   the diameter of the tree + 1.
+  
+  if(abs(lams[1]-1)<10^(-14)) lams = lams[-1]
+  if(length(lams)!=length(coefs)){
+    print("ERROR:  In function acHat, do not pass the first eigenvalue. Then, ensure that lams and coefs are vectors of the same length.")
+    return(NA)
+  }
+  K = length(lams)
+  mat = matrix(NA, nrow = diam+1, ncol = K)
+  for(j in 1:K) mat[,j] = lams[j]^(0:diam)
+  est = mat %*% coefs
+  return(est)
 }
+
+
+
+makeCov = function(Tr, ac, ridge = 0){
+  # ac is the (estimated) auto-covariance function; e.g.  use acHat
+  # Tr is the tree structure.
+  # 
+  # should be used as follows:
+  #  lams, coefs estimated via first difference, auto correlation, or SBM.
+  #  makeCov(Tr, acHat(coefs, lams, diameter(Tr, directed = F)))
+  #  then, this function plays an essential role in compute the GLS estimator.  
+  
+  dmat = shortest.paths(Tr,mode = "all") + 1 # this is an igraph function that finds pairwise distances in the tree.  for indexing... +1.
+  n = nrow(dmat)
+  Cov = diag(0, n)
+  
+  for(t in 1:length(ac)) Cov[which(dmat==t)] = ac[t]
+  diag(Cov) = (1+ridge) * diag(Cov)
+  return(Cov)
+}
+
+
+gls = function(Tr = c(), ac = c(), Y, Cov = c()){
+  # after estimating lams, coefs via first difference, auto correlation, or SBM... 
+  # this can estimate the mean via:
+  #  gls(Y= Yvh, Cov= makeCov(Tr, acHat(coefs, lams, diameter(Tr, directed = F))))
+  # could 
+  if(sum(is.na(Y))==0) if(length(ac)>0){
+    if(sd(ac[-length(ac)]/ac[-1])<10^-8){  # if the Rank-2 model.  
+      lam = ac[2]/ac[1]
+      x = (1- lam*(degree(Tr,mode = "all") - 1))/(1 + lam)
+      return(1/(sum(x))*as.vector(x%*%Y))
+    }
+  }
+  if(length(Cov) ==0) Cov = makeCov(Tr, ac)  
+  x = solve(a = Cov[complete.cases(Y),complete.cases(Y)],b = rep(1, length(Y[complete.cases(Y)])))
+  return(1/(sum(x))*as.vector(x%*%Y[complete.cases(Y)]))
+}
+
+
+
+
+
+
+
+################
+#### DELTA ####
+################
+# This estimator is not that good.  
+
+
+diffGLS = function(Tr, Y){
+  # this adds laplace smoothing in this first line:
+  n = length(Y)
+  lam = (d2(Tr,Y) - d1(Tr,Y))/(d1(Tr,Y)+1/sqrt(n))  # the value of 1/sqrt(n) is appropriate for y \in {0,1}
+  ac = acHat(coefs = 1,lam,diameter(Tr, directed = F))  
+  return(c(gls(Tr = Tr, ac = ac, Y = Y), lam))
+}
+
+
+d1 = function(Tr, Y){
+  # computes the first difference, squared, over the tree.
+  eg = ends(Tr, 1:length(E(Tr)))
+  return(mean((Y[eg[,1]] - Y[eg[,2]])^2))
+}
+
+
+d2 = function(Tr,Y){
+  # computes the second difference, squared, over the tree.
+  at = get.adjacency(as.undirected(Tr)) 
+  a2 = at%*%at
+  a2 = a2 - diag(diag(a2))
+  eg = which(a2!=0, arr.ind = T)
+  return(mean((Y[eg[,1]] - Y[eg[,2]])^2))
+}
+
+
+
+################
+#### auto ####
+################
+
+
+
+
+# estimate the autocovariance of adjacent entries in the tree.
+autoInnerRDS = function(Tr, Y, mu = c()){
+  # given a tree Tr and values Y, compute auto correlation between Y_sigma  and  Y_sigma', 
+  #  where sigma' is the parent of sigma.  
+  # if given a previous estimate of mu, pass this.  otherwise, uses sample average.  
+  if(length(mu)==0) mu = mean(Y)
+  Yc = as.vector(scale(Y - mu, center = F))
+  eg = ends(Tr, 1:length(E(Tr)))
+  return(mean(Yc[eg[,1]] * Yc[eg[,2]]))
+}
+
+
+
+autoGLS = function(Tr,Y, lamBounds = c(.1,.95)){
+  # this code computes the results for the AUTO estimator of \lambda. 
+  #  it allows for "non-convergent" iterative-sequences of fGLS estimators (estimate mu, then \lambda, then mu, then \lambda).  
+  
+  # returns muHat, lamHat, if(converged), 
+  if(sd(Y)==0) return(mean(Y))
+  
+  lamIter = autoInnerRDS(Tr,Y)
+  delt = 100
+  while(delt > .0001 & lamIter < .99 & lamIter > 0){
+    ac = acHat(coefs = 1,lamIter,diameter(Tr, directed = F))  
+    
+    # the one-dimensional GLS estimator has a closed form solution that is much faster to compute.  
+    muHatGLS= gls(Tr = Tr, ac = ac, Y = Y)  
+    lamOld = lamIter
+    lamIter = autoInnerRDS(Tr,Y, mu = muHatGLS)
+    
+    delt = abs(lamOld  -lamIter)
+  }
+  if(delt < .01 & lamIter < .99 & lamIter > 0) return(c(muHatGLS, lamIter, T))
+  
+  # otherwise, do the iterative search.
+  
+  
+  lamSeq = seq(lamBounds[1],lamBounds[2], by = .01)  # the resolution could be increased... by = .001 would slow the calculation.
+  
+  len = length(lamSeq)
+  lamGradient = cbind(lamSeq, NA)
+  muHatGLS = rep(NA, len)
+  
+  for(i in 1:len){
+    
+    # this uses coefs =1 because in this "one dimensional" model muHatGLS does not change with coef.
+    ac = acHat(coefs = 1,lamSeq[i],diameter(Tr, directed = F))  
+    
+    # the one-dimensional GLS estimator has a closed form solution that is much faster to compute.  
+    muHatGLS[i]= gls(Tr = Tr, ac = ac, Y = Y)  
+    lamGradient[i,2] = autoInnerRDS(Tr, scale(Y- muHatGLS[i], center =F))  # this is the AUTO estimator for \lambda
+    
+    # sig2 = mean((Y-muHatGLS[i])^2)
+    # lamGradient[i,3]= 1 - d1(Tr,Y)/(2*sig2)   # this is the DIFF estimator for \lambda
+  }
+  
+  # this finds the "fixed points", even when they don't exist...
+  gradient = lamGradient[,-1]-lamGradient[,1]
+  # fixed points have gradient = 0; this just finds the minimum in abs.
+  fixedPoint = which.min(abs(gradient))
+  
+  
+  results = rep(F, 8)
+  #   names(results) =c(
+  #     "muHatAuto", "lamHatAuto", "AutoConverge")
+  
+  results[1] = muHatGLS[fixedPoint]
+  results[2] =  lamGradient[fixedPoint,1]
+  
+  # it is possible that the code returns an estimate of \lambda at the boundary of the region investigated.
+  #  if this is the case, more care is required.  
+  # if it is on the lower boundary, broaden the range and repeat. (not implemented automatically)
+  # if it is on the upper boundary, plot the gradient, plot muHatGLS vector above.  Investigate.  Use other estimators?
+  
+  return(c(results, F))
+}
+
+
+
+##################
+###### SBM  ######
+##################
+
+
+# Qest = function(Tr, memb){
+#   eg = ends(Tr, 1:length(E(Tr)))
+#   Q = table(as.data.frame(cbind(memb[eg[,1]], memb[eg[,2]])))
+#   if(nrow(Q) != ncol(Q)){
+#     print("ERROR:  Q is rectangular")
+#     return(NA)
+#   }
+#   
+#     if(!diagnostics) return(c(mean(Y, na.rm = T),NA))
+#     if(diagnostics){
+#       return(list(muhatGLS = mean(Y, na.rm = T), eigenSummaries = data.frame(eigenValues = rep(NA, length(unique(memb))-1 ), yfInnerprod = rep(NA, length(unique(memb))-1 ))))
+#     }
+#   }
+#   Q = (Q + t(Q))/2
+#   
+#   
+# }
+# 
+
+
+
+sbmGLS = function(Tr, Y, memb, diagnostics = F, Q = NULL, deg= NULL){
+  # using 
+  #    the tree, 
+  #    Y (which could be re-weighted via VH), 
+  #    and a vector of memberships (e.g. demographic variables such as gender or race),
+  # this function returns the fGLS estimate. 
+  # Without an apriori good choice for memb, see the diagnostic functions.  
+  #   Alternatively, use Y (first ensure it is discrete, e.g. "high" vs "low")
+  # if deg is specified, this function will compute Volz-Heckathorn weights and use the GLS correction for the normalizing constant
+  #   standard weights are computed as:
+  #   d =degree(g)[s]
+  #   H = 1/mean(1/d)
+  #   w = H/d
+  #   Yvh = w*Y
+  #   $correction=H.gls = mean(1/d)/sbmGLS(Tr,Y = 1/deg,memb)
+  
+  # if there are no degrees specified, set them to all be one. 
+  if(is.null(deg)) deg = rep(1, length(Y))
+  # if there is no variation in the observed Y's, output that value.
+  if(sd(Y, na.rm=T)==0){
+    if(!diagnostics) return(c(mean(Y, na.rm = T), NA))
+    if(diagnostics) return(list(
+      muhatGLS = mean(Y), 
+      eigenSummaries = data.frame(
+        eigenValues = NA, 
+        yfInnerprod = NA),
+      rse = 1,
+      correction = NA
+    ))
+  }
+  
+  # these are the referral edges.
+  eg = ends(Tr, 1:length(E(Tr)))
+  
+  # function can specify the Q matrix.  If not, it is computed.
+  if(length(Q) ==0){
+    transitions = cbind(memb[eg[,1]], memb[eg[,2]])  # edge list for referral tree
+    Q = table(as.data.frame(rbind(transitions,transitions[,2:1])))  # the funny rbind is to make Q symmetric.
+    if(nrow(Q)==1){  # if there is no variation in Q, then we cannot make any GLS adjustments.
+      if(!diagnostics) return(c(mean(Y, na.rm = T), NA))
+      if(diagnostics) return(list(
+        muhatGLS = mean(Y), # if degrees were specified, this is VH estimator.
+        eigenSummaries = data.frame(
+          eigenValues = NA, 
+          yfInnerprod = NA),
+        rse = 1,
+        correction = NA
+      ))
+    }
+    #     if(nrow(Q) != ncol(Q)){
+    #       if(!diagnostics) return(c(mean(Y, na.rm = T),NA))
+    #       if(diagnostics){
+    #         return(list(muhatGLS = mean(Y, na.rm = T), eigenSummaries = data.frame(eigenValues = rep(NA, length(unique(memb))-1 ), yfInnerprod = rep(NA, length(unique(memb))-1 ))))
+    #       }
+    #     }
+    # Q = (Q + t(Q))/2
+  }
+  # Added "regularization" or laplace smoothing here:
+  L = diag(1/sqrt(rowSums(Q)+1))%*%Q%*%diag(1/sqrt(colSums(Q)+1))  
+  eiL = eigen(L)
+  
+  # if L is approximately rank 1, then no need for GLS... just leads to numerical problems.  #  TODO:  add a diagnostic check to see if GLS is necessary.
+  if(abs(eiL$values[2]) < 10^(-5)){   
+    if(!diagnostics) return(c(mean(Y, na.rm  =T),0))
+    if(diagnostics) return(list(
+      muhatGLS = mean(Y), 
+      eigenSummaries = data.frame(
+        eigenValues = eiL$values[-1], 
+        yfInnerprod = sqrt(coefs[-1]/var(Y, na.rm=T))),
+      rse = 1,
+      correction = NA
+    ))
+    #     if(diagnostics){
+    #       return(list(muhatGLS = mean(Y, na.rm=T), eigenSummaries = data.frame(eigenValues = rep(0, length(unique(memb))-1 ), yfInnerprod = rep(NA, length(unique(memb))-1 ))))
+    #     } 
+    #     
+  }
+  
+  
+  # this is the function that is described in the paper.
+  m = sum(Q)
+  Z = model.matrix(~as.factor(memb) -1)
+  fhat = sqrt(m) * diag(1/sqrt(rowSums(Q))) %*% eiL$vec
+  Yna = Y; Yna[is.na(Yna)] = 0
+  Ybar = t(Y[complete.cases(Y)])%*%Z[complete.cases(Y),]/sum(complete.cases(Y))
+  coefs = (Ybar%*%fhat)^2
+  ac = acHat(coefs[-1], eiL$values[-1], diam = diameter(Tr,directed = F)+1)
+  # if(var(Y)>ac[1]) ac[1] = var(Y)
+  ac[1] = var(Y, na.rm=T) + ac[1] 
+  if(!diagnostics) return(c(gls(Tr, ac, Y), eiL$values[2])) 
+  if(diagnostics){
+    correction = mean(1/deg)/gls(Tr, ac, 1/deg)
+    return(list(
+      muhatGLS = gls(Tr, ac, Y) * correction, 
+      eigenSummaries = data.frame(
+        eigenValues = eiL$values[-1], 
+        yfInnerprod = coefs[-1]),
+      rse = rse(Tr=Tr, Y, lams = eiL$values[-1], beta2s = coefs[-1]),
+      correction = correction
+    ))}
+}
+
+
+
+
+
+rse = function(Tr, Yvh, lams, beta2s){
+  # compute the ratio of standard errors (rse) for GLS / sampleAverage.  
+  ac = acHat(beta2s, lams, diam = diameter(Tr,directed = F)+1)
+  if(length(beta2s)>1) if(var(Yvh) > 5* ac[1] ) ac[1] = 2* ac[1]
+  Sig = makeCov(Tr, ac)
+  return(sqrt(sum(solve(Sig,rep(1, nrow(Sig))))^(-1) / sum(Gz(Tr, z = lams)[,2]*beta2s)))
+}
+
+
+
+#### Diagnostic plotting function #####
+
+
+summary.gls4rds = function(Yvh, Tr, memb = c(), legendTF = T, leftPlot = T, plotTitle = " ", bottomPlot = T, textSize=1){
+  
+  
+  #   we want code that will plot the ratio of log_2 SE(VH) / SE(GLS).  
+  #         that is log(sqrt(G(z)*n)/sqrt((1+z)/(1-z)),2)
+  #   over the range [-.95,.95], unless we have an estimate of \lambda_2 outside of this...
+  #   In addition to that line, we want marks on the x-axis corresponding to 
+  #   \lambda_auto, \lambda_\Delta, \lambda_{SBM-Y}
+  #   Finally, if there is a partition z, for each \lambda_j, j>1 of Q_L, 
+  #   make a stick proportional to <y,f_j>^2 / var(y) at \lambda_j.  
+  #        The sum of the stick heights should be the maximal value of the line.  
+  #        Also, add a line at zero to reflect how much variation in y is not explained by the spectrum of Q_L.
+  
+  
+  ####  1)  compute all eigenvalues and <y,f_j>^2 for SBM-z
+  ####  2)  compute G(z) and log(sqrt(G(z)*n)/sqrt((1+z)/(1-z)),2) on the appropriate range
+  ####  3)  plot the function, plot the marks, plot the sticks. 
+  
+  
+  
+  
+  ####  1)  compute all eigenvalues and <y,f_j>^2 for SBM-z
+  n = length(Yvh)
+  muAUTO = autoGLS(Tr,Yvh)
+  muDIFF = diffGLS(Tr,Yvh)
+  muSBMy = sbmGLS(Tr, Yvh, as.factor(Yvh==0))
+  if(length(memb) > 0) muSBMfull = sbmGLS(Tr, Yvh, memb, diagnostics = T)
+  
+  eigVals = c(muAUTO[2], muDIFF[2], muSBMy[2])
+  if(length(memb) > 0) eigVals = c(muAUTO[2], muDIFF[2], muSBMy[2],muSBMfull$eigenSummaries[,1])
+  
+  rng = range(eigVals)
+  if(rng[1] > 0) rng[1] =  0
+  if(rng[1] < 0) rng[1] =  - sqrt(abs(rng[1]))
+  if(rng[2] < .95) rng[2] = .95
+  if(rng[2] > .95) rng[2] = .999
+  #   
+  rng =  c(0,.97)
+  ####  2)  compute G(z) and log(sqrt(G(z)*n)/sqrt((1+z)/(1-z)),2) on the appropriate range
+  
+  gz = Gz(Tr,z = c(seq(rng[1], rng[2], len= 100), eigVals))
+  zseq = gz[,1]
+  gz = gz[,2]
+  Ratio = (sqrt(gz*n)/sqrt((1+zseq)/(1-zseq)))^(-1)
+  
+  
+  
+  
+  ####  3)  plot the function, plot the marks, plot the sticks. 
+  par(las = 1)
+  ylab = " "
+  if(leftPlot){
+    ylab = "ratio of SE's"
+  }
+  xlab = " " 
+  if(bottomPlot) xlab = "estimated eigenvalue"
+  
+  # plot(zseq[1:100], Ratio[1:100], type = 'l', col = "grey", xlab = xlab, ylab = ylab, log = "y", main  = plotTitle)
+  if(leftPlot) plot(zseq[1:100], Ratio[1:100], ylim = c(min(Ratio[1:100])-.05,1 + .05),type = 'l', col = "grey", xlab = xlab, ylab = ylab, main  = plotTitle)
+  if(!leftPlot) plot(zseq[1:100], Ratio[1:100], ylim = c(min(Ratio[1:100])-.05,1 + .05),type = 'l', col = "grey", xlab = xlab, ylab = ylab, main  = plotTitle, yaxt ="n")
+  points(eigVals[1],rse(Tr, Yvh, eigVals[1], var(Yvh)), pch = "a", cex = textSize)
+  points(eigVals[2],rse(Tr, Yvh, eigVals[2], var(Yvh)), pch = 2, cex = textSize)
+  points(eigVals[3],rse(Tr, Yvh, eigVals[3], var(Yvh)), pch = "y", cex = textSize)
+  
+  if(length(memb) > 0){
+    nostics = muSBMfull$eigenSummaries
+    yaxis = muSBMfull$rse
+    yaxis = rse(Tr,Yvh, nostics[,1], nostics[,2])
+    for(k in 1:nrow(nostics)){
+      points(nostics[k,1], yaxis, pch ="z", cex = textSize)
+    }
+  }
+  lines(c(-1,1), c(1,1), col = "grey", lty=3)
+  # legend("topleft", pch = list(97,2,122,121), legend = c(expression(hat(mu)[auto]), expression(hat(mu)[Delta]), expression(hat(mu)[SBM-y]), expression(hat(mu)[SBM-z])))
+  if(legendTF){
+    # if(length(memb) > 0) 
+    legend("bottomleft", pch = list(97,2,121,122), legend = c("auto", expression(Delta), "SBM-y", "SBM-z"))
+    # if(length(memb) == 0) legend("bottomleft", pch = list(97,2,121), legend = c("auto", expression(Delta), "SBM-y"))
+    #   
+    #   if((length(memb) >0) & (mean(Y==0) >.05) & !quiet){
+    #     #   Still testing this feature.
+    #     tmp =fisher.test(Y, memb)
+    #     names(tmp)
+    #     
+    #     print("For the null hypothesis that the labels Y are independent from the memberships,")
+    #     if(tmp$p.value < .05){
+    #       paste("Fisher's exact test rejects at level .05, with p-value = ", tmp$p.value,".", sep ="")
+    #       print("This suggests that the supplied memberships are relevant and provides evidence")
+    #       print("in support of using SBM-z")
+    #     }
+    #     if(tmp$p.value > .05){
+    #       paste("Fisher's exact test does not reject at level .05, with p-value = ", round(tmp$p.value,2),".", sep ="")
+    #       print("This suggests that the supplied memberships are not relevant for this outcome.")
+    #       print("SBM-z is unlikely to diminish the variability of the standard estimator.")
+    #   }
+    #   
+    
+    print(paste("muHat_auto =", round(muAUTO[1],2)))
+    print(paste("muHat_Delta =",round(muDIFF[1],2)))
+    print(paste("muHat_SBM-y =",round(muSBMy[1],2)))
+    if(length(memb) > 0) print(paste("muHat_SBM-z =",round(muSBMfull$muhatGLS,2)))
+    
+  }
+  
+  
+}
+
+
+
+
+
+
+
+Gz = function(treei = c(), dsi = c(), z = seq(0,.95,len = 100), plott = T){
+  # given a referral tree, compute the function G(z), where G is the probability generating function for the following random variable D:
+  #  select two nodes I and J uniformly from the tree and define D to be the distance between I and J.  
+  #       the smallest value is D=0, the largest value is the diameter of the tree. 
+  #  We are most interested in this function for values between -1 and 1.  
+  
+  
+  good = F
+  if(length(dsi)>0){
+    ni = (1+sqrt(1+8*sum(dsi)))/2  # solve quadratic formula to get number of nodes from sum of pairs: sum(dsi) 
+    good = T
+  }
+  if(length(treei)>0){
+    dsi = distance_table(treei,directed = F)$res
+    ni = length(V(treei))
+    good = T
+  }
+  if(good ==F){
+    print("you need to pass the referral tree or a table giving the 'histogram' of pairwise distances in the tree.")
+    return(NA)
+  }
+  gz = rep(NA, length(z))
+  pathLengths=c(ni,2*dsi)
+  for(i in 1:length(z)) gz[i] = z[i]^(0:length(dsi))%*% pathLengths/ni^2
+  
+  dat = cbind(z, as.vector(gz))
+  #   which(diff(dat[,2])/diff(dat[,1]) > 1)
+  #   
+  #   colnames(dat) = c("z", "G(z)")
+  #   if(plott) plot(dat, type = "l", las = 1, log = "y")
+  #   plot(dat[-1,1], diff(log(dat[,2]))/diff(dat[,1]))
+  #   plot(dat[-(1:2),1], diff(diff(log(dat[,2])))/diff(dat[-1,1]))
+  #   
+  #   
+  #   plot(dat[,2])
+  #   
+  return(dat)
+}
+
+
+
+
+
+
+
 
 
 
