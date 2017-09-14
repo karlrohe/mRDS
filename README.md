@@ -19,6 +19,9 @@ Functions
 ```R
 atb(x, outcome = "HIV", blockVariable = NULL, Bcount, rawSamples = F, verbose = T, pretty = T)
 atb_power(n,m, A, seeds = .9, pi = NULL, ybar = NULL, Bcount= 1000, for.simulation =F, rawOutput=F)
+
+sbmGLS(x, outcome, blockVariable, diagnostics = F, Q = NULL, deg= T)
+summary.gls4rds(x, outcome, blockVariable,...)
 ```
 
 
@@ -60,6 +63,18 @@ for.simulation    # if True, then there will be less text printed to the termina
                   #   the function returns the width of the confidence interval
 rawOutput         # if True, then there will be less text printed to the terminal window and 
                   #   the function returns Bcount many simulations of the Volz-Heckathorn estimator
+                  
+diagnostics       # if True, sbmGLS outputs additional summaries from the eigen computations.
+Q                 # when NULL, this matrix is computed in the code. For some simulations, 
+                  #   it is nice to specify it.
+deg               # when deg = TRUE and network.size.variable or network.size is specified, 
+                  #   then this uses adjusted Volz-Heckathorn weights... 
+                  #   the adjustment to VH is that the normalizing constant which estimates 
+                  #   E(1/deg(X)) is computed via GLS, 
+                  #   rather than via a sample average (as in the original VH).
+                  # when deg = FALSE and/or network.size.variable / network.size are not specified
+                  #   then no "bias adjustments" are made for node degrees.
+  
 ```
 
 Details
@@ -122,13 +137,37 @@ bootData = dat[bootSamples[,1],]
 # note that "recruiter.id" is the recruiter from the original sample, not the bootstrapped sample. 
 
 ```
-
-
-Or, perform a power calculation
+The function `sbmGLS` constructs the estimator described in the paper [Generalized least squares can overcome the critical threshold in respondent-driven sampling](https://arxiv.org/abs/1708.04999).
 ```R
-# If you set seeds as a probability...
+sbmGLS(dat, outcome = "HIV", blockVariable = "block")
+```
 
+The diagnostic plot described in the paper [Generalized least squares can overcome the critical threshold in respondent-driven sampling](https://arxiv.org/abs/1708.04999) is accessed with `summary.gls4rds`.
+
+```R
+summary.gls4rds(dat, outcome = "HIV", blockVariable = "block")
+```
+
+In development:  `atb` can constructs intervals with the sbmGLS estimator via the argument `glsBoot=T`.  While it is reasonable to suppose that this creates honest confidence intervals, this awaits further analysis.  The code below uses 100 bootstrap samples because it is only for illustration.  Final analyses should use more (e.g. 1000+).
+
+```R
+atb(dat, outcome = "HIV", blockVariable = "block", Bcount = 100, verbose = F)  # default uses VH estimate
+atb(dat, outcome = "HIV", blockVariable = "block", Bcount = 100, verbose = F, glsBoot = T)
+```
+
+
+
+
+atb can be used to perform a power calculation (currently, not implemented with sbmGLS).
+
+```R
+# If you set seeds as a probability,
+#  then the number of seeds will be choosen so that 
+#  the probability of reaching n samples is at least that probability.
+#  This assumes a Galton-Watson model for the referral tree.
 atb_power(n=1000, m=2, A=.8, seeds=.9, Bcount= 1000)
+
+
 
 # If you set seeds as an integer... 
 #   atb_power estimates the probability of chain death 

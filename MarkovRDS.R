@@ -1,5 +1,6 @@
 library(dplyr)
 library(lazyeval)
+library(tibble)
 
 # This file contains code to perform 
 # 1) the assisted treebootstrap, as described in https://arxiv.org/abs/1505.05461
@@ -12,7 +13,7 @@ library(lazyeval)
 #######################################################################
 
 
-atb = function(x, outcome = "HIV", blockVariable = NULL, Bcount, rawSamples = F, verbose = T, pretty = T){
+atb = function(x, outcome = "HIV", blockVariable = NULL, Bcount, rawSamples = F, verbose = T, pretty = T, glsBoot = F){
   
   # x is a tibble or data.frame with the following columns:
   #  id, recruiter.id, network.size (or network.size.variable), "outcome" and "blockVariable"
@@ -221,38 +222,69 @@ atb = function(x, outcome = "HIV", blockVariable = NULL, Bcount, rawSamples = F,
   
   if(rawSamples) return(bsIndices)
   
-  # compute the Volz-Heckathorn point estimate for each bootstrap sample, i.e. using the samples from each column of bsIndices:
   
-  b.vh= apply(bsIndices, 2, function(samp) return(vh(z = as.matrix(x[samp,outcome]), degs[samp])))
-  if(!pretty)return(b.vh)
-  
-  if(pretty){
-    cat("The Volz-Heckathorn estimate is:\n")
-    cat(round(vh(as.matrix(x[,outcome]), degs),2))
-    cat("\n \n")
-    cat("The 90% confidence interval is:\n")
-    print(round(quantile(b.vh, probs = c(.05,.95)),2))
+  if(!glsBoot){# compute the Volz-Heckathorn point estimate for each bootstrap sample, i.e. using the samples from each column of bsIndices:
+    
+    b.vh= apply(bsIndices, 2, function(samp) return(vh(z = as.matrix(x[samp,outcome]), degs[samp])))
+    if(!pretty)return(b.vh)
+    
+    if(pretty){
+      cat("The Volz-Heckathorn estimate is:\n")
+      cat(round(vh(as.matrix(x[,outcome]), degs),2))
+      cat("\n \n")
+      cat("The 90% confidence interval is:\n")
+      print(round(quantile(b.vh, probs = c(.05,.95)),2))
+      
+      
+      # print("A qq-plot examines whether the estimator appears approximately normally distributed.")
+      # print("Do not be scared by this plot and feel free to ignore it.")
+      # print("The qq-plot can be used to examine why the confidence interval is not symmetric.")
+      # print("If it is not symmetric, fear not; the bootstrap confidence interval above is still valid.")
+      # qqnorm(scale(b.vh))
+      # abline(0,1)
+    }
+  }
+  if(glsBoot){
+    b.gls = apply(bsIndices,2, bootGLSfunction, x = dat, outcome = "HIV", blockVariable = "block", deg = T)
     
     
-    # print("A qq-plot examines whether the estimator appears approximately normally distributed.")
-    # print("Do not be scared by this plot and feel free to ignore it.")
-    # print("The qq-plot can be used to examine why the confidence interval is not symmetric.")
-    # print("If it is not symmetric, fear not; the bootstrap confidence interval above is still valid.")
-    # qqnorm(scale(b.vh))
-    # abline(0,1)
+    
+    # b.vh= apply(bsIndices, 2, function(samp) return(vh(z = as.matrix(x[samp,outcome]), degs[samp])))
+    if(!pretty)return(b.gls)
+    
+    if(pretty){
+      cat("The sbmGLS estimate is:\n")
+      cat(
+        round(
+          sbmGLS(x, outcome, blockVariable,deg= T), 2))
+      
+      cat("\n \n")
+      cat("The 90% confidence interval is:\n")
+      print(round(quantile(b.gls, probs = c(.05,.95)),2))
+      
+      
+      # print("A qq-plot examines whether the estimator appears approximately normally distributed.")
+      # print("Do not be scared by this plot and feel free to ignore it.")
+      # print("The qq-plot can be used to examine why the confidence interval is not symmetric.")
+      # print("If it is not symmetric, fear not; the bootstrap confidence interval above is still valid.")
+      # qqnorm(scale(b.vh))
+      # abline(0,1)
+    }
   }
   
 }
-
-
-
-
 
 
 vh = function(z,degs){
   # computes the vh estimator.
   degH = 1/mean(1/degs)
   return(mean(z/degs)*degH)
+}
+
+bootGLSfunction = function(bootID, x, outcome, blockVariable, deg){
+  # calls sbmGLS, for use inside of atb.
+  x[,-(1:2)]= x[bootID,-(1:2)]
+  return(sbmGLS(x=x, outcome=outcome, blockVariable=blockVariable, deg = deg))
 }
 
 
@@ -460,7 +492,7 @@ atb_power = function(n,m, A, seeds = .9, pi = NULL,ybar = NULL, Bcount= 1000, fo
   
   if(!for.simulation)  cat("\n",names(dat), "\n" , round(dat,2), "\n \n")
   if(for.simulation) return(dat)
-  }
+}
 
 
 
@@ -573,7 +605,7 @@ gls = function(Tr = c(), ac = c(), Y, Cov = c()){
 
 diffGLS = function(Tr, Y){
   # this adds laplace smoothing in this first line:
-  n = length(Y)
+  n = sum(complete.cases(Y))
   lam = (d2(Tr,Y) - d1(Tr,Y))/(d1(Tr,Y)+1/sqrt(n))  # the value of 1/sqrt(n) is appropriate for y \in {0,1}
   ac = acHat(coefs = 1,lam,diameter(Tr, directed = F))  
   return(c(gls(Tr = Tr, ac = ac, Y = Y), lam))
@@ -583,7 +615,10 @@ diffGLS = function(Tr, Y){
 d1 = function(Tr, Y){
   # computes the first difference, squared, over the tree.
   eg = ends(Tr, 1:length(E(Tr)))
-  return(mean((Y[eg[,1]] - Y[eg[,2]])^2))
+  # this fixes the indexing, so that eg doesn't contain node id's, but rather row # in x.
+  eg = cbind(match(as.numeric(eg[,1]), as.vector(V(Tr)$name)),match(as.numeric(eg[,2]), as.vector(V(Tr)$name)))
+  
+  return(mean((Y[eg[,1]] - Y[eg[,2]])^2, na.rm=T))
 }
 
 
@@ -593,7 +628,7 @@ d2 = function(Tr,Y){
   a2 = at%*%at
   a2 = a2 - diag(diag(a2))
   eg = which(a2!=0, arr.ind = T)
-  return(mean((Y[eg[,1]] - Y[eg[,2]])^2))
+  return(mean((Y[eg[,1]] - Y[eg[,2]])^2, na.rm = T))
 }
 
 
@@ -610,10 +645,12 @@ autoInnerRDS = function(Tr, Y, mu = c()){
   # given a tree Tr and values Y, compute auto correlation between Y_sigma  and  Y_sigma', 
   #  where sigma' is the parent of sigma.  
   # if given a previous estimate of mu, pass this.  otherwise, uses sample average.  
-  if(length(mu)==0) mu = mean(Y)
+  if(length(mu)==0) mu = mean(Y, na.rm=T)
   Yc = as.vector(scale(Y - mu, center = F))
   eg = ends(Tr, 1:length(E(Tr)))
-  return(mean(Yc[eg[,1]] * Yc[eg[,2]]))
+  # fix the indexing (as done elsewhere in this document)
+  eg = cbind(match(as.numeric(eg[,1]), as.vector(V(Tr)$name)),match(as.numeric(eg[,2]), as.vector(V(Tr)$name)))
+  return(mean(Yc[eg[,1]] * Yc[eg[,2]], na.rm=T))
 }
 
 
@@ -623,7 +660,7 @@ autoGLS = function(Tr,Y, lamBounds = c(.1,.95)){
   #  it allows for "non-convergent" iterative-sequences of fGLS estimators (estimate mu, then \lambda, then mu, then \lambda).  
   
   # returns muHat, lamHat, if(converged), 
-  if(sd(Y)==0) return(mean(Y))
+  if(sd(Y, na.rm= T)==0) return(mean(Y))
   
   lamIter = autoInnerRDS(Tr,Y)
   delt = 100
@@ -710,7 +747,19 @@ autoGLS = function(Tr,Y, lamBounds = c(.1,.95)){
 
 
 
-sbmGLS = function(Tr, Y, memb, diagnostics = F, Q = NULL, deg= NULL){
+sbmGLS = function(x, outcome, blockVariable, diagnostics = F, Q = NULL, deg= T){
+  # x is a tibble or data.frame with the following columns:
+  #  id, recruiter.id, network.size (or network.size.variable)
+  # outcome is the name of a column in x that contains the measurement for which we want to estimate the population mean. 
+  # blockVariable is the column name of a feature (as.character) which pseudo-stratifies the sampling.  
+  #    By "pseudo-stratifies", these variables should be highly auto-correlated in referrals.  
+  #    Future code will help to select these features. 
+  #    If it is not specified, then it is set to outcome.
+  # diagnostics = T outputs additional information
+  # Q (i.e. the matrix which counts of transitions between blocks) can be specified.  If Q = NULL, then the code below computes Q.
+  # If deg = T and network.size.variable are specified, then this uses adjusted Volz-Heckathorn weights... 
+  #   the adjustment to VH is that the normalizing constant which estimates E(1/deg(X)) is computed via GLS, rather than via a sample average (as in the original VH).
+  
   # using 
   #    the tree, 
   #    Y (which could be re-weighted via VH), 
@@ -718,6 +767,8 @@ sbmGLS = function(Tr, Y, memb, diagnostics = F, Q = NULL, deg= NULL){
   # this function returns the fGLS estimate. 
   # Without an apriori good choice for memb, see the diagnostic functions.  
   #   Alternatively, use Y (first ensure it is discrete, e.g. "high" vs "low")
+  # diagnostics = T returns more information about the spectral properties used in RSE and other diagnostics.
+  # Q can be supplied.  If not, it is computed with memb.  
   # if deg is specified, this function will compute Volz-Heckathorn weights and use the GLS correction for the normalizing constant
   #   standard weights are computed as:
   #   d =degree(g)[s]
@@ -726,8 +777,38 @@ sbmGLS = function(Tr, Y, memb, diagnostics = F, Q = NULL, deg= NULL){
   #   Yvh = w*Y
   #   $correction=H.gls = mean(1/d)/sbmGLS(Tr,Y = 1/deg,memb)
   
+  # construct the tree:
+  Tr = graph.edgelist(cbind(as.character(x[,"recruiter.id"][[1]]),as.character(x[,"id"][[1]])))
+  
+  makeNewSeed = F
+  if(length(which(degree(Tr, mode = "in") == 0))>1){
+    tmpRow = x[1,]
+    tmpRow[] = NA
+    tmpRow[1] = names(which(degree(Tr, mode = "in") == 0))
+    x = rbind(tmpRow, x) %>% as_tibble
+    makeNewSeed = T
+  }
+  if(!makeNewSeed) Tr = delete_vertices(Tr,v = 1)
+  
+  Y = x[,outcome][[1]]
+  memb = x[,blockVariable][[1]]
+  
+  # Set the deg variable. 
   # if there are no degrees specified, set them to all be one. 
-  if(is.null(deg)) deg = rep(1, length(Y))
+  if(length(deg)==0) deg = rep(1, length(Y))
+  if(length(deg)>1 && length(deg) < length(memb)){
+    print("deg is incorrectly specified")
+    return(NA)
+  }
+  if(length(deg)==1){  
+    if(!deg){
+      deg = rep(1, length(Y))
+    }else{
+      if("network.size" %in% names(x)) deg = x[,"network.size"][[1]]
+      if("network.size.variable" %in% names(x)) deg = x[,"network.size.variable"][[1]]
+    }
+  } 
+  
   # if there is no variation in the observed Y's, output that value.
   if(sd(Y, na.rm=T)==0){
     if(!diagnostics) return(c(mean(Y, na.rm = T), NA))
@@ -743,6 +824,9 @@ sbmGLS = function(Tr, Y, memb, diagnostics = F, Q = NULL, deg= NULL){
   
   # these are the referral edges.
   eg = ends(Tr, 1:length(E(Tr)))
+  # this fixes the indexing, so that eg doesn't contain node id's, but rather row # in x.
+  eg = cbind(match(as.numeric(eg[,1]), as.vector(V(Tr)$name)),match(as.numeric(eg[,2]), as.vector(V(Tr)$name)))
+  
   
   # function can specify the Q matrix.  If not, it is computed.
   if(length(Q) ==0){
@@ -792,16 +876,28 @@ sbmGLS = function(Tr, Y, memb, diagnostics = F, Q = NULL, deg= NULL){
   # this is the function that is described in the paper.
   m = sum(Q)
   Z = model.matrix(~as.factor(memb) -1)
+  if(makeNewSeed) Z = rbind(rep(0, ncol(Z)),Z)
   fhat = sqrt(m) * diag(1/sqrt(rowSums(Q))) %*% eiL$vec
+  # Y = Y[-1]  # remove the "false seed"
   Yna = Y; Yna[is.na(Yna)] = 0
   Ybar = t(Y[complete.cases(Y)])%*%Z[complete.cases(Y),]/sum(complete.cases(Y))
   coefs = (Ybar%*%fhat)^2
   ac = acHat(coefs[-1], eiL$values[-1], diam = diameter(Tr,directed = F)+1)
   # if(var(Y)>ac[1]) ac[1] = var(Y)
   ac[1] = var(Y, na.rm=T) + ac[1] 
-  if(!diagnostics) return(c(gls(Tr, ac, Y), eiL$values[2])) 
+  
+  # deg = deg[-1]
+  Di = 1/(deg); Di[is.na(Di)] = 0 
+  DiBar = t(Di[complete.cases(Di)])%*%Z[complete.cases(Di),]/sum(complete.cases(Di))
+  DiCoefs = (DiBar%*%fhat)^2
+  acD = acHat(DiCoefs[-1], eiL$values[-1], diam = diameter(Tr,directed = F)+1)
+  # if(var(Y)>ac[1]) ac[1] = var(Y)
+  acD[1] = var(Di, na.rm=T) + acD[1] 
+  
+  correction = mean(Di)/gls(Tr, acD, Di)
+  
+  if(!diagnostics) return(gls(Tr, ac, Y)*correction) 
   if(diagnostics){
-    correction = mean(1/deg)/gls(Tr, ac, 1/deg)
     return(list(
       muhatGLS = gls(Tr, ac, Y) * correction, 
       eigenSummaries = data.frame(
@@ -829,7 +925,16 @@ rse = function(Tr, Yvh, lams, beta2s){
 #### Diagnostic plotting function #####
 
 
-summary.gls4rds = function(Yvh, Tr, memb = c(), legendTF = T, leftPlot = T, plotTitle = " ", bottomPlot = T, textSize=1){
+
+
+
+
+
+
+
+
+summary.gls4rds = function(x, outcome, blockVariable, legendTF = T, leftPlot = T, plotTitle = " ", bottomPlot = T, textSize=1){
+  # summary.gls4rds = function(Yvh, Tr, memb = c(), legendTF = T, leftPlot = T, plotTitle = " ", bottomPlot = T, textSize=1){
   
   
   #   we want code that will plot the ratio of log_2 SE(VH) / SE(GLS).  
@@ -848,17 +953,31 @@ summary.gls4rds = function(Yvh, Tr, memb = c(), legendTF = T, leftPlot = T, plot
   ####  3)  plot the function, plot the marks, plot the sticks. 
   
   
+  Tr = graph.edgelist(cbind(as.character(x[,"recruiter.id"][[1]]),as.character(x[,"id"][[1]])))
+  
+  makeNewSeed = F
+  if(length(which(degree(Tr, mode = "in") == 0))>1){
+    tmpRow = x[1,]
+    tmpRow[] = NA
+    tmpRow[1] = names(which(degree(Tr, mode = "in") == 0))
+    x = rbind(tmpRow, x) %>% as_tibble
+    makeNewSeed = T
+  }
+  Y = x[,outcome][[1]]
+  memb = x[,blockVariable][[1]]
+  
+  if(!makeNewSeed) Tr = delete_vertices(Tr,v = 1)
   
   
   ####  1)  compute all eigenvalues and <y,f_j>^2 for SBM-z
-  n = length(Yvh)
-  muAUTO = autoGLS(Tr,Yvh)
-  muDIFF = diffGLS(Tr,Yvh)
-  muSBMy = sbmGLS(Tr, Yvh, as.factor(Yvh==0))
-  if(length(memb) > 0) muSBMfull = sbmGLS(Tr, Yvh, memb, diagnostics = T)
+  n = length(Y)
+  muAUTO = autoGLS(Tr,Y)
+  muDIFF = diffGLS(Tr,Y)
+  muSBMy = sbmGLS(x, outcome, outcome,diagnostics = T, deg= F)
+  if(length(memb) > 0) muSBMfull = sbmGLS(x, outcome, blockVariable,diagnostics = T, deg= T)
   
-  eigVals = c(muAUTO[2], muDIFF[2], muSBMy[2])
-  if(length(memb) > 0) eigVals = c(muAUTO[2], muDIFF[2], muSBMy[2],muSBMfull$eigenSummaries[,1])
+  eigVals = c(muAUTO[2], muDIFF[2], muSBMy$eigenSummaries$eigenValues)
+  if(length(memb) > 0) eigVals = c(muAUTO[2], muDIFF[2], muSBMy$eigenSummaries$eigenValues,muSBMfull$eigenSummaries[,1])
   
   rng = range(eigVals)
   if(rng[1] > 0) rng[1] =  0
@@ -889,14 +1008,14 @@ summary.gls4rds = function(Yvh, Tr, memb = c(), legendTF = T, leftPlot = T, plot
   # plot(zseq[1:100], Ratio[1:100], type = 'l', col = "grey", xlab = xlab, ylab = ylab, log = "y", main  = plotTitle)
   if(leftPlot) plot(zseq[1:100], Ratio[1:100], ylim = c(min(Ratio[1:100])-.05,1 + .05),type = 'l', col = "grey", xlab = xlab, ylab = ylab, main  = plotTitle)
   if(!leftPlot) plot(zseq[1:100], Ratio[1:100], ylim = c(min(Ratio[1:100])-.05,1 + .05),type = 'l', col = "grey", xlab = xlab, ylab = ylab, main  = plotTitle, yaxt ="n")
-  points(eigVals[1],rse(Tr, Yvh, eigVals[1], var(Yvh)), pch = "a", cex = textSize)
-  points(eigVals[2],rse(Tr, Yvh, eigVals[2], var(Yvh)), pch = 2, cex = textSize)
-  points(eigVals[3],rse(Tr, Yvh, eigVals[3], var(Yvh)), pch = "y", cex = textSize)
+  points(eigVals[1],rse(Tr, Y, eigVals[1], var(Y)), pch = "a", cex = textSize)
+  points(eigVals[2],rse(Tr, Y, eigVals[2], var(Y)), pch = 2, cex = textSize)
+  points(eigVals[3],rse(Tr, Y, eigVals[3], var(Y)), pch = "y", cex = textSize)
   
   if(length(memb) > 0){
     nostics = muSBMfull$eigenSummaries
     yaxis = muSBMfull$rse
-    yaxis = rse(Tr,Yvh, nostics[,1], nostics[,2])
+    yaxis = rse(Tr,Y, nostics[,1], nostics[,2])
     for(k in 1:nrow(nostics)){
       points(nostics[k,1], yaxis, pch ="z", cex = textSize)
     }
@@ -928,7 +1047,7 @@ summary.gls4rds = function(Yvh, Tr, memb = c(), legendTF = T, leftPlot = T, plot
     
     print(paste("muHat_auto =", round(muAUTO[1],2)))
     print(paste("muHat_Delta =",round(muDIFF[1],2)))
-    print(paste("muHat_SBM-y =",round(muSBMy[1],2)))
+    print(paste("muHat_SBM-y =",round(muSBMy$muhatGLS,2)))
     if(length(memb) > 0) print(paste("muHat_SBM-z =",round(muSBMfull$muhatGLS,2)))
     
   }
