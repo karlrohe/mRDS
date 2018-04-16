@@ -1,6 +1,7 @@
 library(dplyr)
 library(lazyeval)
 library(tibble)
+library(Matrix)
 
 # This file contains code to perform 
 # 1) the assisted treebootstrap, as described in https://arxiv.org/abs/1505.05461
