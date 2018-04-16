@@ -14,7 +14,7 @@ library(Matrix)
 #######################################################################
 
 
-atb = function(x, outcome = "HIV", blockVariable = NULL, Bcount, rawSamples = F, verbose = T, pretty = T, glsBoot = F){
+atb = function(x, outcome = "HIV", blockVariable = NULL, Bcount, rawSamples = F, verbose = T, pretty = T, glsBoot = F, symmetric = F){
   
   # x is a tibble or data.frame with the following columns:
   #  id, recruiter.id, network.size (or network.size.variable), "outcome" and "blockVariable"
@@ -30,6 +30,8 @@ atb = function(x, outcome = "HIV", blockVariable = NULL, Bcount, rawSamples = F,
   #    The elements of the returned matrix are row indices corresponding to rows of x.  
   # verbose = F should be used in simulation experiments. 
   # pretty = F returns the Bcount-many bootstrapped point estimates.
+  # symmetric = T symmetrizes Q (the estimate of B) before doing the resampling.  
+  #               this is useful for testing reversibility (samples under null = reversible)
   
   #  TODO:  automatically fix the "chronology issue" described next.
   #  TODO:  create a procedure to help pick the blockVariable
@@ -81,6 +83,7 @@ atb = function(x, outcome = "HIV", blockVariable = NULL, Bcount, rawSamples = F,
   blockVariable = attr(x,'blockVariable')
   
   Qsbm = attr(x,'Q')
+  if(symmetric) Qsbm = Qsbm + t(Qsbm)
   Psbm = diag(1/rowSums(Qsbm))%*%Qsbm 
   rownames(Psbm) = rownames(Qsbm)
   
