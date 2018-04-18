@@ -31,18 +31,30 @@ getGraph = function(N=100000, K=5){
 # n = 1000
 # here are functions to simulate an RDS:
 
-simpleRDS=function(G, lambda, n, inflation = 3){
+simpleRDS=function(G, lambda, n, inflation = 3, nmin = 1, maxRepeats = 1){
   # Given an igraph G, a poisson rate parameter lambda, and a sample size n, this function simulates an RDS process.
   #   inflation needs to be big enough such that we can get enough samples.  In sparse graphs G, it needs to be bigger.
-  #   when inflation is larger, the first step takes more time:
-  Tr = treeSamp(lambda, n*inflation)  # this function samples a tree as an igraph.
-  thisSeed = sample(V(G), 1)[1]  # this samples a seed node from G. 
+  #   when inflation is larger, the first step (Tr = treeSamp) takes more time:
+  # Sometimes, the sampling in RDSwithTree fails (it runs out of friends to refer because of without-replacement sampling)
+  #  So, this function includes a while loop, to restart the sample and keep trying
+  #    until a sample successfully gets nmin samples, or until maxRepeat attempts.  
   
   # this function samples without replacement, filling the nodes of Tr with node id's from G.  
-  # Tr has 3*n nodes (instead of n) because sometimes the sampling cannot be peformed...
+  # Tr has inflation*n nodes (instead of n) because sometimes the sampling cannot be peformed...  say inflation = 3...
   #    a node must refer 3 friends in Tr, but that node doesn't have that many friends (who have not yet participated)
   # X will only have 3*n elements, many of which are NA. 
-  X = RDSwithTree(G,Tr, seed = thisSeed,repl=F, n)  
+  
+  
+  
+  X = rep(NA, 10)
+  tick = 0
+  while(sum(complete.cases(X)) < nmin){
+    Tr = treeSamp(lambda, n*inflation*(tick+1))  # this function samples a tree as an igraph.
+    thisSeed = sample(V(G), 1)[1]  # this samples a seed node from G. 
+    X = RDSwithTree(G,Tr, seed = thisSeed,repl=F, n)  
+    tick = tick + 1
+    if(tick > maxRepeats) nmin = 0  # break out of this while loop.
+  }
   TrSub = induced_subgraph(Tr, which(complete.cases(X))[1:n])  # this removes the nodes of Tr that were not used in X.  
   Xsub = X[complete.cases(X)][1:n]  # discard the NA's.  
   el = get.edgelist(TrSub)  # this records which elements of X referred which other elements. 
@@ -57,6 +69,8 @@ simpleRDS=function(G, lambda, n, inflation = 3){
     ) 
   )
 }
+
+
 
 
 treeSamp = function(lambda, sampSizei, seeds = NULL){
@@ -145,14 +159,16 @@ RDSwithTree = function(Gi,tree, seed = c(),repl=F, sampSizei){
 
 sampChildren = function(ego, X, Gi, numRefs, repl){
   # this function is used inside RDSwithTree
-  neigh = neighbors(graph = Gi,v = ego)              # find the neighbors
-  if(repl) return(sample(neigh,numRefs,replace = T))# if it is with replacement, just do it.
+  neigh = as.character(neighbors(graph = Gi,v = ego))              # find the neighbors
+  if(repl) return(as.numeric(sample(neigh,numRefs,replace = T)))# if it is with replacement, just do it.
   if(!repl){                                        # otherwise,
-    neigh = setdiff(neigh, X[complete.cases(X)])    # remove previously sampled nodes,
+    neigh = setdiff(neigh, as.character(X[complete.cases(X)]))    # remove previously sampled nodes,
     numRefs = min(numRefs, length(neigh)) 
-    return(sample(neigh, numRefs, replace = F))
+    return(as.numeric(sample(neigh, numRefs, replace = F)))
   }
 }
+
+
 
 
 
