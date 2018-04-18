@@ -31,9 +31,11 @@ getGraph = function(N=100000, K=5){
 # n = 1000
 # here are functions to simulate an RDS:
 
-simpleRDS=function(G, lambda, n){
+simpleRDS=function(G, lambda, n, inflation = 3){
   # Given an igraph G, a poisson rate parameter lambda, and a sample size n, this function simulates an RDS process.
-  Tr = treeSamp(lambda, n*3)  # this function samples a tree as an igraph.
+  #   inflation needs to be big enough such that we can get enough samples.  In sparse graphs G, it needs to be bigger.
+  #   when inflation is larger, the first step takes more time:
+  Tr = treeSamp(lambda, n*inflation)  # this function samples a tree as an igraph.
   thisSeed = sample(V(G), 1)[1]  # this samples a seed node from G. 
   
   # this function samples without replacement, filling the nodes of Tr with node id's from G.  
